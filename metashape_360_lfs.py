@@ -247,6 +247,32 @@ def get_applied_transform(fix_upside_down: bool = True) -> np.ndarray:
 
 
 
+def build_component_transform_4x4(component_dict: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    """
+    Get the combined component transform as a 4x4 matrix.
+
+    For single-component projects (most common), returns that component's transform.
+    For multi-component projects, this is more complex - we'd need per-point component IDs.
+
+    Args:
+        component_dict: Dictionary of component_id -> 4x4 transform matrix
+
+    Returns:
+        4x4 numpy array if single component with transform, None otherwise
+    """
+    if len(component_dict) == 0:
+        return None
+    elif len(component_dict) == 1:
+        # Single component - use its transform
+        return list(component_dict.values())[0]
+    else:
+        # Multiple components - would need per-point component assignment
+        # For now, warn and return None (points stay in component-local coords)
+        print("WARNING: Multiple components detected. Point cloud may not be correctly transformed.")
+        print("         Consider merging components in Metashape before export.")
+        return None
+
+
 def convert_metashape_to_lichtfeld(
     images_dir: Path,
     xml_path: Path,
@@ -257,7 +283,7 @@ def convert_metashape_to_lichtfeld(
 ) -> Dict[str, Any]:
     """
     Convert Metashape data to LichtFeld-compatible transforms.json format.
-    
+
     Args:
         images_dir: Directory containing images
         xml_path: Path to Metashape cameras.xml
@@ -265,19 +291,19 @@ def convert_metashape_to_lichtfeld(
         ply_path: Optional path to point cloud PLY file
         fix_upside_down: If True, fix the upside-down scene orientation
         verbose: Print progress messages
-    
+
     Returns:
         Dictionary with conversion statistics
     """
     # Default output to same directory as XML
     if output_dir is None:
         output_dir = xml_path.parent
-    
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if verbose:
         print(f"Parsing Metashape XML: {xml_path}")
-    
+
     # Parse XML
     xml_data = parse_metashape_xml(xml_path)
     sensor_dict = xml_data["sensor_dict"]
@@ -391,43 +417,49 @@ def convert_metashape_to_lichtfeld(
     if ply_path is not None and ply_path.exists():
         if verbose:
             print(f"Processing point cloud: {ply_path}")
-        
+
+        # NOTE: Metashape's PLY export already applies component transforms to point coordinates,
+        # but the XML camera transforms are still in component-local coordinates.
+        # So we only apply the LichtFeld coordinate transform to the PLY, NOT the component transform.
+        # (Component transform is only needed for cameras from XML)
+
         if HAS_OPEN3D:
             pc = o3d.io.read_point_cloud(str(ply_path))
             points3D = np.asarray(pc.points)
-            
-            # Apply same transformation as cameras
+
+            # Apply LichtFeld coordinate transform only (row swap + orientation fix)
+            # Component transform is NOT applied - PLY export already includes it
             points3D = np.einsum("ij,bj->bi", applied_transform[:3, :3], points3D) + applied_transform[:3, 3]
             pc.points = o3d.utility.Vector3dVector(points3D)
-            
+
             output_ply = output_dir / "pointcloud.ply"
             o3d.io.write_point_cloud(str(output_ply), pc)
             data["ply_file_path"] = "pointcloud.ply"
             pointcloud_written = True
-            
+
             if verbose:
                 print(f"Wrote point cloud with {len(points3D)} points to {output_ply}")
-        
+
         elif HAS_PLYFILE:
             # Fallback to plyfile
             plydata = PlyData.read(str(ply_path))
             vertex = plydata['vertex']
             points3D = np.vstack([vertex['x'], vertex['y'], vertex['z']]).T
-            
-            # Apply transformation
+
+            # Apply LichtFeld coordinate transform only
             points3D = np.einsum("ij,bj->bi", applied_transform[:3, :3], points3D) + applied_transform[:3, 3]
-            
+
             # Write back (simplified, may lose color data)
             new_vertex = np.zeros(len(points3D), dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
             new_vertex['x'] = points3D[:, 0]
             new_vertex['y'] = points3D[:, 1]
             new_vertex['z'] = points3D[:, 2]
-            
+
             output_ply = output_dir / "pointcloud.ply"
             PlyData([PlyElement.describe(new_vertex, 'vertex')]).write(str(output_ply))
             data["ply_file_path"] = "pointcloud.ply"
             pointcloud_written = True
-            
+
             if verbose:
                 print(f"Wrote point cloud with {len(points3D)} points (colors may be lost)")
         else:
