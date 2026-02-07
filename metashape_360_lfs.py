@@ -153,8 +153,9 @@ def parse_metashape_xml(xml_path: Path) -> Dict[str, Any]:
                 
                 m = np.eye(4)
                 m[:3, :3] = r
-                m[:3, 3] = t / s
-                component_dict[component.get("id")] = m
+                m[:3, 3] = t
+                component_dict[component.get("id")] = [m, s]
+                #print(f"Component {component.get('id')} transform:\n{m}")
     
     # Parse camera frames
     cameras = chunk.find("cameras")
@@ -279,6 +280,7 @@ def convert_metashape_to_lichtfeld(
     output_dir: Optional[Path] = None,
     ply_path: Optional[Path] = None,
     fix_upside_down: bool = True,
+    scale: float = 1.0,
     verbose: bool = True
 ) -> Dict[str, Any]:
     """
@@ -372,10 +374,12 @@ def convert_metashape_to_lichtfeld(
         # Apply component transform if present
         component_id = camera.get("component_id")
         if component_id in component_dict:
-            transform = component_dict[component_id] @ transform
+            transform[:3, 3] = transform[:3, 3] * component_dict[component_id][1] # Scale translation
+            transform = component_dict[component_id][0] @ transform
         
         # Convert to LichtFeld convention
         transform = transform_camera_matrix(transform, fix_upside_down)
+        transform[:3, 3] *= scale # Scale translation
         
         # Get image path relative to output directory
         src_image = image_filename_map[camera_label]
@@ -430,6 +434,7 @@ def convert_metashape_to_lichtfeld(
             # Apply LichtFeld coordinate transform only (row swap + orientation fix)
             # Component transform is NOT applied - PLY export already includes it
             points3D = np.einsum("ij,bj->bi", applied_transform[:3, :3], points3D) + applied_transform[:3, 3]
+            points3D *= scale
             pc.points = o3d.utility.Vector3dVector(points3D)
 
             output_ply = output_dir / "pointcloud.ply"
@@ -448,6 +453,7 @@ def convert_metashape_to_lichtfeld(
 
             # Apply LichtFeld coordinate transform only
             points3D = np.einsum("ij,bj->bi", applied_transform[:3, :3], points3D) + applied_transform[:3, 3]
+            points3D *= scale
 
             # Write back (simplified, may lose color data)
             new_vertex = np.zeros(len(points3D), dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
@@ -506,6 +512,8 @@ Examples:
                         help="Optional path to point cloud PLY file")
     parser.add_argument("--output", type=Path, default=None,
                         help="Output directory (defaults to same folder as XML)")
+    parser.add_argument("--scale", type=float, default=1.0,
+                        help="Scaling factor")
     parser.add_argument("--no-fix-rotation", action="store_true",
                         help="Disable 180° rotation fix (scene may appear upside-down)")
     parser.add_argument("--quiet", action="store_true",
@@ -532,6 +540,7 @@ Examples:
             output_dir=args.output,
             ply_path=args.ply,
             fix_upside_down=not args.no_fix_rotation,
+            scale=args.scale,
             verbose=not args.quiet
         )
         
